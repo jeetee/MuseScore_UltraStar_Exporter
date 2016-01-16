@@ -26,7 +26,7 @@ MuseScore {
         }
         if (!(curScore)) {
             errorDialog.openErrorDialog(qsTranslate("QMessageBox",
-					"No score open.\nThis plugin requires an open score to run.\n"))
+                    "No score open.\nThis plugin requires an open score to run.\n"))
             Qt.quit()
         } else {
             exportDialog.visible = true
@@ -263,7 +263,8 @@ MuseScore {
                     ) + ".txt"
         console.log(filename)
 
-        var txtContent = ""
+        var txtContent = "";
+        var bpm = getTempo_BPM();
         var title = curScore.title
         if (duet.checked) {
             title += " Duet"
@@ -285,7 +286,7 @@ MuseScore {
         txtContent += "#VIDEOGAP:" + crlf
         txtContent += "#START:0" + crlf
 
-        txtContent += "#BPM:" + getTempo_BPM() + crlf;
+        txtContent += "#BPM:" + bpm + crlf;
 
         txtContent += "#GAP:0" + crlf
 
@@ -297,13 +298,13 @@ MuseScore {
                                voicePlayer1.currentIndex)
 
         cursor.rewind(0)
-        txtContent += getSongText(cursor);
+        txtContent += getSongText(cursor, bpm);
 
         if (duet.checked) {
             txtContent += "P2" + crlf
             cursor = getCursor(instrumentPlayer2.currentText,
                                voicePlayer2.currentIndex)
-            txtContent += getSongText(cursor);
+            txtContent += getSongText(cursor, bpm);
         }
         txtContent += "E" + crlf
         console.log(txtContent)
@@ -312,110 +313,100 @@ MuseScore {
         return true
     }
 
-    function getSongText(cursor) {
-        var crlf = "\r\n"
-        var syllable = ""
-        var songContent = ""
-        var pitch_midi
-        var timestamp_midi_ticks
-        var duration_midi_ticks
-        var gotfirstsyllable = false
-        var needABreak = false
-        var makeGolden = false
-        var makeFreestyle = false
-        var lineHeader = ":"
-        var changedTempo = undefined;
+    function getSongText(cursor, initialBPM) {
+        var crlf = "\r\n";
+        var syllable = "";
+        var songContent = "";
+        var timestamp_midi_ticks;
+        var currentBPM = initialBPM;
+        var props = {
+            bpm: undefined,
+            golden: false,
+            freestyle: false,
+            lineBreak: false
+        };
 
         while (cursor.segment) {
-
-            if (needABreak && gotfirstsyllable) {
-                timestamp_midi_ticks = calculateMidiTicksfromTicks(cursor.tick);
-                songContent += "-" + timestamp_midi_ticks + crlf
-                needABreak = false
+            timestamp_midi_ticks = calculateMidiTicksfromTicks(cursor.tick);
+            //process lineBreak from previous segment; UltraStar uses it to hide the previous lyrics line
+            if (props.lineBreak) {
+                songContent += "-" + timestamp_midi_ticks + crlf;
             }
 
-            needABreak = checkForMarkerInStaffText(cursor.segment, "/", true)
-            makeGolden = checkForMarkerInStaffText(cursor.segment, "*", true)
-            makeFreestyle = checkForMarkerInStaffText(cursor.segment, "F", true)
-            changedTempo = getNewBPMFromSegment(cursor.segment);
+            props = processAnnotations(cursor.segment);
+
+            if (props.bpm && (props.bpm !== currentBPM)) {
+                songContent += "B " + timestamp_midi_ticks + " " + props.bpm + crlf;
+                currentBPM = props.bpm;
+            }
 
             if (cursor.element && cursor.element.type === Element.CHORD) {
-                syllable = "-"
-                if (cursor.element.lyrics.length > 0) {
-                    syllable = cursor.element.lyrics[0].text
-                    if (cursor.element.lyrics[0].syllabic === Lyrics.SINGLE
-                            || cursor.element.lyrics[0].syllabic === Lyrics.END) {
-
+                if (cursor.element.lyrics.length > 0) { //0 means, 1st verse, enable multiples one day
+                    syllable = cursor.element.lyrics[0].text;
+                    if (   (cursor.element.lyrics[0].syllabic === Lyrics.SINGLE)
+                        || (cursor.element.lyrics[0].syllabic === Lyrics.END)
+                        ) {
                         syllable += " "
-                    } else {
-                        syllable += "-"
                     }
                 }
-
-                pitch_midi = cursor.element.notes[0].ppitch
-                duration_midi_ticks = calculateMidiTicksfromTicks(cursor.element.duration.ticks);
-                timestamp_midi_ticks = calculateMidiTicksfromTicks(cursor.tick);
-
-                if (!gotfirstsyllable) {
-                    gotfirstsyllable = true
-                }
-
-                lineHeader = ":"
-                if (makeGolden) {
-                    lineHeader = "*"
-                }
-                if (makeFreestyle) {
-                    lineHeader = "F"
-                }
-
-                if (changedTempo) {
-                    songContent += "B " + timestamp_midi_ticks + " " + changedTempo + crlf;
-                }
-                songContent += lineHeader + " " + timestamp_midi_ticks + " "
-                        + duration_midi_ticks + " " + pitch_midi + " " + syllable + crlf
+                
+                songContent += ((props.golden)? "*" : ((props.freestyle)? "F" : ":")) + " "
+                    + timestamp_midi_ticks + " "
+                    + calculateMidiTicksfromTicks(cursor.element.duration.ticks) + " "
+                    + cursor.element.notes[0].ppitch + " "
+                    + syllable + crlf;
             }
-            cursor.next()
+            cursor.next();
         }
-        return songContent
+        return songContent;
     }
 
-    function checkForMarkerInStaffText(segment, marker, hide) {
+    function processAnnotations(segment) {
+        var res = {
+            bpm: undefined,
+            golden: false,
+            freestyle: false,
+            lineBreak: false
+        };
+        var hide = false;
         for (var i = 0; i < segment.annotations.length; i++) {
             if (segment.annotations[i].type === Element.STAFF_TEXT) {
-                if (segment.annotations[i].text === marker) {
-                    if (hide && segment.annotations[i].visible){
-                        curScore.startCmd()
-                        segment.annotations[i].visible=false
-                        curScore.endCmd(false)
-                    }
-                    return true
+                hide = false;
+                //currently supporting only one marker per staff text
+                switch (segment.annotations[i].text) {
+                    case '*': hide = true; res.golden = true;
+                        break;
+                    case 'F': hide = true; res.freestyle = true;
+                        break;
+                    case '/': hide = true; res.lineBreak = true;
+                        break;
+                    default: /* nothing to do */ break;
+                }
+                if (hide && segment.annotations[i].visible) {
+                    curScore.startCmd();
+                    segment.annotations[i].visible = false;
+                    curScore.endCmd(false);
                 }
             }
-        }
-        return false
-    }
-
-    function getNewBPMFromSegment(segment) {
-        for (var i = 0; i < segment.annotations.length; i++) {
-            if (segment.annotations[i].type === Element.TEMPO_TEXT) {
-                return calculateBPMfromTempo(segment.annotations[i].tempo);
+            else if (segment.annotations[i].type === Element.TEMPO_TEXT) {
+                res.bpm = calculateBPMfromTempo(segment.annotations[i].tempo);
             }
         }
-        return undefined; //invalid - no tempo text found
+        return res;
     }
 
     function calculateMidiTicksfromTicks(ticks) {
-		if (highAccuracyMode.checked)
-		{
-			// /5 because values at https://musescore.org/plugin-development/tick-length-values are all multiples of 5
-			// and we want to have maximal precision whilst keeping numeric values as small as possible
-			return (ticks / 5);
-		}
-		else
-		{//normal accuracy mode
-			//division is a global variable holding the tickLength of a crochet(1/4th note)
-			return Math.round(ticks / division * 4); // *4 scales from crotchet-reference to whole measure
-		}
+        if (highAccuracyMode.checked)
+        {
+            // /5 because values at https://musescore.org/plugin-development/tick-length-values are all multiples of 5
+            // and we want to have maximal precision whilst keeping numeric values as small as possible
+            return (ticks / 5);
+        }
+        else
+        {//normal accuracy mode
+            //division is a global variable holding the tickLength of a crochet(1/4th note)
+            return Math.round(ticks / division * 4); // *4 scales from crotchet-reference to whole measure
+        }
     }
 
     function getCursor(instrument, voice) {
@@ -434,19 +425,19 @@ MuseScore {
     function calculateBPMfromTempo(tempo) {
         //tempo is a % compared to 60bpm (tempo == 1 -> bpm == 60)
         if (highAccuracyMode.checked)
-		{
-			//division is a global variable holding the tickLength of a crochet(1/4th note)
-			//scaling tempo with tickLength allows very precise approximation of real note lengths in export
-			// *15 (*60 for real BPM, then /4 to scale to crotchet because 4* crotchet == 60 and division is in crotchet)
-			// /5 because values at https://musescore.org/plugin-development/tick-length-values are all multiples of 5
-			// and we want to have maximal precision whilst keeping numeric values as small as possible
-			// so in total we do (*15/5) == * 3
-			return (tempo * division * 3);
-		}
-		else
-		{//normal accuracy mode
-			return (tempo * 60);
-		}
+        {
+            //division is a global variable holding the tickLength of a crochet(1/4th note)
+            //scaling tempo with tickLength allows very precise approximation of real note lengths in export
+            // *15 (*60 for real BPM, then /4 to scale to crotchet because 4* crotchet == 60 and division is in crotchet)
+            // /5 because values at https://musescore.org/plugin-development/tick-length-values are all multiples of 5
+            // and we want to have maximal precision whilst keeping numeric values as small as possible
+            // so in total we do (*15/5) == * 3
+            return (tempo * division * 3);
+        }
+        else
+        {//normal accuracy mode
+            return (tempo * 60);
+        }
     }
 
     function getTempo_BPM() {
